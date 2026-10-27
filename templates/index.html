@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Based Smart Traffic Signal Optimization</title>
+<style>
+  :root{--bg:#0f172a;--card:#1e293b;--text:#e2e8f0;--muted:#94a3b8;--acc:#38bdf8;--g:#22c55e;--r:#ef4444;--y:#eab308}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text)}
+  main{max-width:960px;margin:0 auto;padding:20px}
+  h1{font-size:1.4rem;margin:0 0 4px} p.sub{color:var(--muted);margin:0 0 20px;font-size:.9rem}
+  .card{background:var(--card);border-radius:12px;padding:16px;margin-bottom:16px}
+  h2{font-size:1rem;margin:0 0 12px;color:var(--acc)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+  label{display:block;font-size:.85rem;color:var(--muted);margin-bottom:4px}
+  input[type=range]{width:100%} input[type=file],select{width:100%;padding:6px;background:#0f172a;color:var(--text);border:1px solid #334155;border-radius:6px}
+  button{background:var(--acc);color:#0f172a;border:0;padding:10px 18px;border-radius:8px;font-weight:600;cursor:pointer;margin-top:12px}
+  button:disabled{opacity:.5;cursor:wait}
+  .val{font-weight:700;color:var(--text)}
+  .bar{height:14px;border-radius:7px;background:#334155;overflow:hidden;margin-top:4px}
+  .bar>div{height:100%;background:var(--acc)}
+  .lane{display:flex;justify-content:space-between;align-items:center;gap:10px}
+  .light{width:22px;height:22px;border-radius:50%;background:var(--r);flex:none}
+  .light.g{background:var(--g)} .light.y{background:var(--y)}
+  .stats{display:flex;gap:24px;flex-wrap:wrap;margin-top:12px}
+  .stat b{display:block;font-size:1.3rem} .stat span{color:var(--muted);font-size:.8rem}
+  .err{color:#fca5a5;margin-top:8px;font-size:.9rem}
+</style>
+</head>
+<body>
+<main>
+  <h1>AI Based Smart Traffic Signal Optimization</h1>
+  <p class="sub">Genetic algorithm + fuzzy logic + classical computer vision. No machine learning.</p>
+
+  <div class="card">
+    <h2>1. Enter lane vehicle counts</h2>
+    <div class="grid" id="sliders"></div>
+    <label style="margin-top:12px">Emergency vehicle lane</label>
+    <select id="emg"><option value="-1">None</option><option value="0">Lane 1</option><option value="1">Lane 2</option><option value="2">Lane 3</option><option value="3">Lane 4</option></select>
+    <button id="goCounts">Optimize signals</button>
+  </div>
+
+  <div class="card">
+    <h2>2. Or upload 4 traffic videos (one per lane)</h2>
+    <div class="grid" id="files"></div>
+    <button id="goVideos">Analyze videos</button>
+    <p class="sub" style="margin-top:8px">Video analysis needs a host that allows large uploads (local or Render). On Vercel use step 1.</p>
+  </div>
+
+  <div class="card" id="result" style="display:none">
+    <h2>Optimized plan</h2>
+    <div id="lanes"></div>
+    <div class="stats">
+      <div class="stat"><b id="cycle">-</b><span>Cycle time (s)</span></div>
+      <div class="stat"><b id="imp">-</b><span>Wait reduction vs fixed 30 s</span></div>
+      <div class="stat"><b id="phase">-</b><span>Live phase</span></div>
+    </div>
+  </div>
+  <div class="err" id="err"></div>
+</main>
+<script>
+const YELLOW = 3, ALL_RED = 2;
+let prev = null, timer = null;
+const $ = id => document.getElementById(id);
+
+for (let i = 0; i < 4; i++) {
+  $("sliders").insertAdjacentHTML("beforeend",
+    `<div><label>Lane ${i+1}: <span class="val" id="v${i}">8</span> vehicles</label>
+     <input type="range" id="s${i}" min="0" max="30" value="8"></div>`);
+  $("files").insertAdjacentHTML("beforeend",
+    `<div><label>Lane ${i+1} video</label><input type="file" id="f${i}" accept="video/*"></div>`);
+  $("s"+i).oninput = e => $("v"+i).textContent = e.target.value;
+}
+
+function show(r) {
+  $("err").textContent = "";
+  $("result").style.display = "block";
+  $("cycle").textContent = r.cycle_time;
+  $("imp").textContent = r.improvement_pct + "%";
+  $("lanes").innerHTML = r.green_times.map((g, i) =>
+    `<div class="lane" style="margin-bottom:10px"><div style="flex:1">
+       <div>Lane ${i+1} <span style="color:var(--muted)">(${Number(r.counts[i]).toFixed(1)} vehicles)</span> &mdash; green <b>${g}s</b></div>
+       <div class="bar"><div style="width:${g/60*100}%"></div></div></div>
+       <div class="light" id="L${i}"></div></div>`).join("");
+  prev = r.counts;
+  runSignal(r.green_times);
+}
+
+function runSignal(g) {
+  clearInterval(timer);
+  let p = 0, state = "g", t = g[0];
+  const paint = () => {
+    for (let i = 0; i < 4; i++) {
+      const el = $("L"+i); if (!el) return;
+      el.className = "light" + (i === p ? (state === "g" ? " g" : state === "y" ? " y" : "") : "");
+    }
+    $("phase").textContent = `Lane ${p+1} ${state === "g" ? "GREEN" : state === "y" ? "YELLOW" : "ALL RED"} (${t}s)`;
+  };
+  paint();
+  timer = setInterval(() => {
+    if (--t <= 0) {
+      if (state === "g") { state = "y"; t = YELLOW; }
+      else if (state === "y") { state = "r"; t = ALL_RED; }
+      else { p = (p + 1) % 4; state = "g"; t = g[p]; }
+    }
+    paint();
+  }, 1000);
+}
+
+async function call(btn, fn) {
+  btn.disabled = true; $("err").textContent = "";
+  try { show(await fn()); } catch (e) { $("err").textContent = e.message; }
+  btn.disabled = false;
+}
+
+async function post(url, opts) {
+  const res = await fetch(url, opts);
+  let data; try { data = await res.json(); } catch { throw new Error(`Server error (${res.status})`); }
+  if (!res.ok) throw new Error(data.error || `Server error (${res.status})`);
+  return data;
+}
+
+$("goCounts").onclick = () => call($("goCounts"), () => post("/plan", {
+  method: "POST", headers: {"Content-Type": "application/json"},
+  body: JSON.stringify({
+    counts: [0,1,2,3].map(i => +$("s"+i).value), prev,
+    emergency_lane: +$("emg").value })
+}));
+
+$("goVideos").onclick = () => call($("goVideos"), () => {
+  const fd = new FormData();
+  for (let i = 0; i < 4; i++) {
+    const f = $("f"+i).files[0];
+    if (!f) throw new Error(`Select a video for lane ${i+1}`);
+    fd.append("video"+i, f);
+  }
+  fd.append("emergency_lane", $("emg").value);
+  if (prev) fd.append("prev", prev.join(","));
+  return post("/analyze", {method: "POST", body: fd});
+});
+</script>
+</body>
+</html>
